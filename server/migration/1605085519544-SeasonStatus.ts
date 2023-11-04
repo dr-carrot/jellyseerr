@@ -1,11 +1,14 @@
 import type { MigrationInterface, QueryRunner } from 'typeorm';
+import { getAutoIncrementSyntax } from '@server/utils/dbIdioms';
+
+const autoIncrementSyntax = getAutoIncrementSyntax();
 
 export class SeasonStatus1605085519544 implements MigrationInterface {
   name = 'SeasonStatus1605085519544';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(
-      `CREATE TABLE "season" ("id" integer PRIMARY KEY ${autoIncrementSyntax} NOT NULL, "seasonNumber" integer NOT NULL, "status" integer NOT NULL DEFAULT (1), "createdAt" datetime NOT NULL DEFAULT (datetime('now')), "updatedAt" datetime NOT NULL DEFAULT (datetime('now')), "mediaId" integer)`
+      `CREATE TABLE "season" ("id" ${autoIncrementSyntax} NOT NULL, "seasonNumber" integer NOT NULL, "status" integer NOT NULL DEFAULT (1), "createdAt" datetime NOT NULL DEFAULT (datetime('now')), "updatedAt" datetime NOT NULL DEFAULT (datetime('now')), "mediaId" integer)`
     );
   }
 
