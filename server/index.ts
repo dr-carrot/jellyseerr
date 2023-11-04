@@ -50,9 +50,17 @@ app
 
     // Run migrations in production
     if (process.env.NODE_ENV === 'production') {
-      await dbConnection.query('PRAGMA foreign_keys=OFF');
-      await dbConnection.runMigrations();
-      await dbConnection.query('PRAGMA foreign_keys=ON');
+      if (dbConnection.options.type === 'sqlite') {
+        // For SQLite, use PRAGMA statements
+        await dbConnection.query('PRAGMA foreign_keys=OFF');
+        await dbConnection.runMigrations();
+        await dbConnection.query('PRAGMA foreign_keys=ON');
+      } else if (dbConnection.options.type === 'postgres') {
+        // For PostgreSQL, use PostgreSQL-specific commands
+        await dbConnection.query('SET CONSTRAINTS ALL DEFERRED');
+        await dbConnection.runMigrations();
+        await dbConnection.query('SET CONSTRAINTS ALL IMMEDIATE');
+      }
     }
 
     // Load Settings
