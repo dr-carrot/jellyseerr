@@ -50,6 +50,9 @@ export class InitialMigration1603944374840 implements MigrationInterface {
     await queryRunner.query(
       `INSERT INTO "temporary_media_request"("id", "status", "createdAt", "updatedAt", "type", "mediaId", "requestedById", "modifiedById") SELECT "id", "status", "createdAt", "updatedAt", "type", "mediaId", "requestedById", "modifiedById" FROM "media_request"`
     );
+    await queryRunner.query(`ALTER TABLE "temporary_media_request" DROP CONSTRAINT "FK_a1aa713f41c99e9d10c48da75a0"`);
+    await queryRunner.query(`ALTER TABLE "temporary_media_request" DROP CONSTRAINT "FK_6997bee94720f1ecb7f31137095"`);
+    await queryRunner.query(`ALTER TABLE "temporary_media_request" DROP CONSTRAINT "FK_f4fc4efa14c3ba2b29c4525fa15"`);
     await queryRunner.query(`DROP TABLE "media_request"`);
     await queryRunner.query(
       `ALTER TABLE "temporary_media_request" RENAME TO "media_request"`
