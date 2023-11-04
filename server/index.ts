@@ -50,14 +50,17 @@ app
 
     // Run migrations in production
     if (process.env.NODE_ENV === 'production') {
+      let autoIncrementSyntax = '';
       if (dbConnection.options.type === 'sqlite') {
-        // For SQLite, use PRAGMA statements
+        // For SQLite, use SQLite-specific commands
         await dbConnection.query('PRAGMA foreign_keys=OFF');
+        autoIncrementSyntax = 'AUTOINCREMENT';
         await dbConnection.runMigrations();
         await dbConnection.query('PRAGMA foreign_keys=ON');
       } else if (dbConnection.options.type === 'postgres') {
         // For PostgreSQL, use PostgreSQL-specific commands
         await dbConnection.query('SET CONSTRAINTS ALL DEFERRED');
+        autoIncrementSyntax = 'SERIAL';
         await dbConnection.runMigrations();
         await dbConnection.query('SET CONSTRAINTS ALL IMMEDIATE');
       }
