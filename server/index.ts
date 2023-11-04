@@ -49,7 +49,7 @@ app
     const dbConnection = await dataSource.initialize();
 
     // Run migrations in production
-    if (process.env.NODE_ENV === 'production') {
+    /*if (process.env.NODE_ENV === 'production') {
       if (dbConnection.options.type === 'sqlite') {
         // For SQLite, use SQLite-specific commands
         await dbConnection.query('PRAGMA foreign_keys=OFF');
@@ -61,7 +61,7 @@ app
         await dbConnection.runMigrations();
         await dbConnection.query('SET CONSTRAINTS ALL IMMEDIATE');
       }
-    }
+    }*/
 
     // Load Settings
     const settings = getSettings().load();
