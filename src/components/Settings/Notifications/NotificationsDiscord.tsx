@@ -3,28 +3,32 @@ import LoadingSpinner from '@app/components/Common/LoadingSpinner';
 import NotificationTypeSelector from '@app/components/NotificationTypeSelector';
 import useSettings from '@app/hooks/useSettings';
 import globalMessages from '@app/i18n/globalMessages';
+import defineMessages from '@app/utils/defineMessages';
 import { ArrowDownOnSquareIcon, BeakerIcon } from '@heroicons/react/24/outline';
-import axios from 'axios';
 import { Field, Form, Formik } from 'formik';
 import { useState } from 'react';
-import { defineMessages, useIntl } from 'react-intl';
+import { useIntl } from 'react-intl';
 import { useToasts } from 'react-toast-notifications';
 import useSWR from 'swr';
 import * as Yup from 'yup';
 
-const messages = defineMessages({
+const messages = defineMessages('components.Settings.Notifications', {
   agentenabled: 'Enable Agent',
   botUsername: 'Bot Username',
   botAvatarUrl: 'Bot Avatar URL',
   webhookUrl: 'Webhook URL',
   webhookUrlTip:
     'Create a <DiscordWebhookLink>webhook integration</DiscordWebhookLink> in your server',
+  webhookRoleId: 'Notification Role ID',
+  webhookRoleIdTip:
+    'The role ID to mention in the webhook message. Leave empty to disable mentions',
   discordsettingssaved: 'Discord notification settings saved successfully!',
   discordsettingsfailed: 'Discord notification settings failed to save.',
   toastDiscordTestSending: 'Sending Discord test notification…',
   toastDiscordTestSuccess: 'Discord test notification sent!',
   toastDiscordTestFailed: 'Discord test notification failed to send.',
   validationUrl: 'You must provide a valid URL',
+  validationWebhookRoleId: 'You must provide a valid Discord Role ID',
   validationTypes: 'You must select at least one notification type',
   enableMentions: 'Enable Mentions',
 });
@@ -53,6 +57,12 @@ const NotificationsDiscord = () => {
         otherwise: Yup.string().nullable(),
       })
       .url(intl.formatMessage(messages.validationUrl)),
+    webhookRoleId: Yup.string()
+      .nullable()
+      .matches(
+        /^\d{17,19}$/,
+        intl.formatMessage(messages.validationWebhookRoleId)
+      ),
   });
 
   if (!data && !error) {
@@ -67,21 +77,30 @@ const NotificationsDiscord = () => {
         botUsername: data?.options.botUsername,
         botAvatarUrl: data?.options.botAvatarUrl,
         webhookUrl: data.options.webhookUrl,
+        webhookRoleId: data?.options.webhookRoleId,
         enableMentions: data?.options.enableMentions,
       }}
       validationSchema={NotificationsDiscordSchema}
       onSubmit={async (values) => {
         try {
-          await axios.post('/api/v1/settings/notifications/discord', {
-            enabled: values.enabled,
-            types: values.types,
-            options: {
-              botUsername: values.botUsername,
-              botAvatarUrl: values.botAvatarUrl,
-              webhookUrl: values.webhookUrl,
-              enableMentions: values.enableMentions,
+          const res = await fetch('/api/v1/settings/notifications/discord', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
             },
+            body: JSON.stringify({
+              enabled: values.enabled,
+              types: values.types,
+              options: {
+                botUsername: values.botUsername,
+                botAvatarUrl: values.botAvatarUrl,
+                webhookUrl: values.webhookUrl,
+                webhookRoleId: values.webhookRoleId,
+                enableMentions: values.enableMentions,
+              },
+            }),
           });
+          if (!res.ok) throw new Error();
 
           addToast(intl.formatMessage(messages.discordsettingssaved), {
             appearance: 'success',
@@ -120,16 +139,27 @@ const NotificationsDiscord = () => {
                 toastId = id;
               }
             );
-            await axios.post('/api/v1/settings/notifications/discord/test', {
-              enabled: true,
-              types: values.types,
-              options: {
-                botUsername: values.botUsername,
-                botAvatarUrl: values.botAvatarUrl,
-                webhookUrl: values.webhookUrl,
-                enableMentions: values.enableMentions,
-              },
-            });
+            const res = await fetch(
+              '/api/v1/settings/notifications/discord/test',
+              {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  enabled: true,
+                  types: values.types,
+                  options: {
+                    botUsername: values.botUsername,
+                    botAvatarUrl: values.botAvatarUrl,
+                    webhookUrl: values.webhookUrl,
+                    webhookRoleId: values.webhookRoleId,
+                    enableMentions: values.enableMentions,
+                  },
+                }),
+              }
+            );
+            if (!res.ok) throw new Error();
 
             if (toastId) {
               removeToast(toastId);
@@ -234,6 +264,21 @@ const NotificationsDiscord = () => {
                   touched.botAvatarUrl &&
                   typeof errors.botAvatarUrl === 'string' && (
                     <div className="error">{errors.botAvatarUrl}</div>
+                  )}
+              </div>
+            </div>
+            <div className="form-row">
+              <label htmlFor="webhookRoleId" className="text-label">
+                {intl.formatMessage(messages.webhookRoleId)}
+              </label>
+              <div className="form-input-area">
+                <div className="form-input-field">
+                  <Field id="webhookRoleId" name="webhookRoleId" type="text" />
+                </div>
+                {errors.webhookRoleId &&
+                  touched.webhookRoleId &&
+                  typeof errors.webhookRoleId === 'string' && (
+                    <div className="error">{errors.webhookRoleId}</div>
                   )}
               </div>
             </div>

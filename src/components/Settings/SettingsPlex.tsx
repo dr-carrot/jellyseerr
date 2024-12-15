@@ -7,6 +7,7 @@ import SensitiveInput from '@app/components/Common/SensitiveInput';
 import LibraryItem from '@app/components/Settings/LibraryItem';
 import SettingsBadge from '@app/components/Settings/SettingsBadge';
 import globalMessages from '@app/i18n/globalMessages';
+import defineMessages from '@app/utils/defineMessages';
 import { ArrowDownOnSquareIcon } from '@heroicons/react/24/outline';
 import {
   ArrowPathIcon,
@@ -15,20 +16,19 @@ import {
 } from '@heroicons/react/24/solid';
 import type { PlexDevice } from '@server/interfaces/api/plexInterfaces';
 import type { PlexSettings, TautulliSettings } from '@server/lib/settings';
-import axios from 'axios';
 import { Field, Formik } from 'formik';
 import { orderBy } from 'lodash';
 import { useMemo, useState } from 'react';
-import { defineMessages, useIntl } from 'react-intl';
+import { useIntl } from 'react-intl';
 import { useToasts } from 'react-toast-notifications';
 import useSWR from 'swr';
 import * as Yup from 'yup';
 
-const messages = defineMessages({
+const messages = defineMessages('components.Settings', {
   plex: 'Plex',
   plexsettings: 'Plex Settings',
   plexsettingsDescription:
-    'Configure the settings for your Plex server. Overseerr scans your Plex libraries to determine content availability.',
+    'Configure the settings for your Plex server. Jellyseerr scans your Plex libraries to determine content availability.',
   serverpreset: 'Server',
   serverLocal: 'local',
   serverRemote: 'remote',
@@ -190,7 +190,10 @@ const SettingsPlex = ({ onComplete }: SettingsPlexProps) => {
         otherwise: Yup.string().nullable(),
       }),
       tautulliExternalUrl: Yup.string()
-        .url(intl.formatMessage(messages.validationUrl))
+        .matches(
+          /^https?:\/\/(www\.)?[-a-zA-Z0-9@:%._+~#=]{1,256}(\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_+.~#?&/=]*))?$/i,
+          intl.formatMessage(messages.validationUrl)
+        )
         .test(
           'no-trailing-slash',
           intl.formatMessage(messages.validationUrlTrailingSlash),
@@ -240,9 +243,15 @@ const SettingsPlex = ({ onComplete }: SettingsPlexProps) => {
       params.enable = activeLibraries.join(',');
     }
 
-    await axios.get('/api/v1/settings/plex/library', {
-      params,
+    const searchParams = new URLSearchParams({
+      sync: params.sync ? 'true' : 'false',
+      ...(params.enable ? { enable: params.enable } : {}),
     });
+    const res = await fetch(
+      `/api/v1/settings/plex/library?${searchParams.toString()}`
+    );
+    if (!res.ok) throw new Error();
+
     setIsSyncing(false);
     revalidate();
   };
@@ -261,11 +270,12 @@ const SettingsPlex = ({ onComplete }: SettingsPlexProps) => {
           toastId = id;
         }
       );
-      const response = await axios.get<PlexDevice[]>(
-        '/api/v1/settings/plex/devices/servers'
-      );
-      if (response.data) {
-        setAvailableServers(response.data);
+      const res = await fetch('/api/v1/settings/plex/devices/servers');
+      if (!res.ok) throw new Error();
+      const data: PlexDevice[] = await res.json();
+
+      if (data) {
+        setAvailableServers(data);
       }
       if (toastId) {
         removeToast(toastId);
@@ -288,16 +298,30 @@ const SettingsPlex = ({ onComplete }: SettingsPlexProps) => {
   };
 
   const startScan = async () => {
-    await axios.post('/api/v1/settings/plex/sync', {
-      start: true,
+    const res = await fetch('/api/v1/settings/plex/sync', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        start: true,
+      }),
     });
+    if (!res.ok) throw new Error();
     revalidateSync();
   };
 
   const cancelScan = async () => {
-    await axios.post('/api/v1/settings/plex/sync', {
-      cancel: true,
+    const res = await fetch('/api/v1/settings/plex/sync', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        cancel: true,
+      }),
     });
+    if (!res.ok) throw new Error();
     revalidateSync();
   };
 
@@ -312,15 +336,19 @@ const SettingsPlex = ({ onComplete }: SettingsPlexProps) => {
           .join(',');
       }
 
-      await axios.get('/api/v1/settings/plex/library', {
-        params,
-      });
+      const searchParams = new URLSearchParams(params.enable ? params : {});
+      const res = await fetch(
+        `/api/v1/settings/plex/library?${searchParams.toString()}`
+      );
+      if (!res.ok) throw new Error();
     } else {
-      await axios.get('/api/v1/settings/plex/library', {
-        params: {
-          enable: [...activeLibraries, libraryId].join(','),
-        },
+      const searchParams = new URLSearchParams({
+        enable: [...activeLibraries, libraryId].join(','),
       });
+      const res = await fetch(
+        `/api/v1/settings/plex/library?${searchParams.toString()}`
+      );
+      if (!res.ok) throw new Error();
     }
     setIsSyncing(false);
     revalidate();
@@ -384,12 +412,19 @@ const SettingsPlex = ({ onComplete }: SettingsPlexProps) => {
                 toastId = id;
               }
             );
-            await axios.post('/api/v1/settings/plex', {
-              ip: values.hostname,
-              port: Number(values.port),
-              useSsl: values.useSsl,
-              webAppUrl: values.webAppUrl,
-            } as PlexSettings);
+            const res = await fetch('/api/v1/settings/plex', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                ip: values.hostname,
+                port: Number(values.port),
+                useSsl: values.useSsl,
+                webAppUrl: values.webAppUrl,
+              } as PlexSettings),
+            });
+            if (!res.ok) throw new Error();
 
             syncLibraries();
 
@@ -747,14 +782,27 @@ const SettingsPlex = ({ onComplete }: SettingsPlexProps) => {
             validationSchema={TautulliSettingsSchema}
             onSubmit={async (values) => {
               try {
-                await axios.post('/api/v1/settings/tautulli', {
-                  hostname: values.tautulliHostname,
-                  port: Number(values.tautulliPort),
-                  useSsl: values.tautulliUseSsl,
-                  urlBase: values.tautulliUrlBase,
-                  apiKey: values.tautulliApiKey,
-                  externalUrl: values.tautulliExternalUrl,
-                } as TautulliSettings);
+                const res = await fetch('/api/v1/settings/tautulli', {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                  },
+                  body: JSON.stringify({
+                    hostname: values.tautulliHostname,
+                    port: Number(values.tautulliPort),
+                    useSsl: values.tautulliUseSsl,
+                    urlBase: values.tautulliUrlBase,
+                    apiKey: values.tautulliApiKey,
+                    externalUrl: values.tautulliExternalUrl,
+                  } as TautulliSettings),
+                });
+                if (!res.ok) throw new Error();
+
+                if (!res.ok) {
+                  throw new Error('Failed to fetch');
+                }
+
+                // Continue with any necessary processing
 
                 addToast(
                   intl.formatMessage(messages.toastTautulliSettingsSuccess),

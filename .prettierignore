@@ -3,7 +3,12 @@
 dist/
 config/
 CHANGELOG.md
+pnpm-lock.yaml
 
 # assets
 src/assets/
 public/
+docs/
+
+# helm charts
+**/charts

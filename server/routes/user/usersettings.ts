@@ -1,3 +1,5 @@
+import { ApiErrorCode } from '@server/constants/error';
+import { UserType } from '@server/constants/user';
 import { getRepository } from '@server/datasource';
 import { User } from '@server/entity/User';
 import { UserSettings } from '@server/entity/UserSettings';
@@ -9,6 +11,7 @@ import { Permission } from '@server/lib/permissions';
 import { getSettings } from '@server/lib/settings';
 import logger from '@server/logger';
 import { isAuthenticated } from '@server/middleware/auth';
+import { ApiError } from '@server/types/error';
 import { Router } from 'express';
 import { canMakePermissionsChange } from '.';
 
@@ -54,7 +57,8 @@ userSettingsRoutes.get<{ id: string }, UserSettingsGeneralResponse>(
         email: user.email,
         discordId: user.settings?.discordId,
         locale: user.settings?.locale,
-        region: user.settings?.region,
+        discoverRegion: user.settings?.discoverRegion,
+        streamingRegion: user.settings?.streamingRegion,
         originalLanguage: user.settings?.originalLanguage,
         movieQuotaLimit: user.movieQuotaLimit,
         movieQuotaDays: user.movieQuotaDays,
@@ -97,7 +101,36 @@ userSettingsRoutes.post<
       });
     }
 
+    const oldEmail = user.email;
+    const oldUsername = user.username;
     user.username = req.body.username;
+    if (user.jellyfinUsername) {
+      user.email = req.body.email || user.jellyfinUsername || user.email;
+    }
+    // Edge case for local users, because they have no Jellyfin username to fall back on
+    // if the email is not provided
+    if (user.userType === UserType.LOCAL) {
+      if (req.body.email) {
+        user.email = req.body.email;
+        if (
+          !user.username &&
+          user.email !== oldEmail &&
+          !oldEmail.includes('@')
+        ) {
+          user.username = oldEmail;
+        }
+      } else if (req.body.username) {
+        user.email = oldUsername || user.email;
+        user.username = req.body.username;
+      }
+    }
+
+    const existingUser = await userRepository.findOne({
+      where: { email: user.email },
+    });
+    if (oldEmail !== user.email && existingUser) {
+      throw new ApiError(400, ApiErrorCode.InvalidEmail);
+    }
 
     // Update quota values only if the user has the correct permissions
     if (
@@ -115,7 +148,8 @@ userSettingsRoutes.post<
         user: req.user,
         discordId: req.body.discordId,
         locale: req.body.locale,
-        region: req.body.region,
+        discoverRegion: req.body.discoverRegion,
+        streamingRegion: req.body.streamingRegion,
         originalLanguage: req.body.originalLanguage,
         watchlistSyncMovies: req.body.watchlistSyncMovies,
         watchlistSyncTv: req.body.watchlistSyncTv,
@@ -123,27 +157,35 @@ userSettingsRoutes.post<
     } else {
       user.settings.discordId = req.body.discordId;
       user.settings.locale = req.body.locale;
-      user.settings.region = req.body.region;
+      user.settings.discoverRegion = req.body.discoverRegion;
+      user.settings.streamingRegion = req.body.streamingRegion;
       user.settings.originalLanguage = req.body.originalLanguage;
       user.settings.watchlistSyncMovies = req.body.watchlistSyncMovies;
       user.settings.watchlistSyncTv = req.body.watchlistSyncTv;
-      user.email = req.body.email ?? user.email;
     }
 
-    await userRepository.save(user);
+    const savedUser = await userRepository.save(user);
 
     return res.status(200).json({
-      username: user.username,
-      discordId: user.settings.discordId,
-      locale: user.settings.locale,
-      region: user.settings.region,
-      originalLanguage: user.settings.originalLanguage,
-      watchlistSyncMovies: user.settings.watchlistSyncMovies,
-      watchlistSyncTv: user.settings.watchlistSyncTv,
-      email: user.email,
+      username: savedUser.username,
+      discordId: savedUser.settings?.discordId,
+      locale: savedUser.settings?.locale,
+      discoverRegion: savedUser.settings?.discoverRegion,
+      streamingRegion: savedUser.settings?.streamingRegion,
+      originalLanguage: savedUser.settings?.originalLanguage,
+      watchlistSyncMovies: savedUser.settings?.watchlistSyncMovies,
+      watchlistSyncTv: savedUser.settings?.watchlistSyncTv,
+      email: savedUser.email,
     });
   } catch (e) {
-    next({ status: 500, message: e.message });
+    if (e.errorCode) {
+      return next({
+        status: e.statusCode,
+        message: e.errorCode,
+      });
+    } else {
+      return next({ status: 500, message: e.message });
+    }
   }
 });
 

@@ -12,6 +12,7 @@ import type { Library } from '@server/lib/settings';
 import { getSettings } from '@server/lib/settings';
 import logger from '@server/logger';
 import AsyncLock from '@server/utils/asyncLock';
+import { getHostname } from '@server/utils/getHostname';
 import { randomUUID as uuid } from 'crypto';
 import { uniqWith } from 'lodash';
 
@@ -62,7 +63,7 @@ class JellyfinScanner {
       const metadata = await this.jfClient.getItemData(jellyfinitem.Id);
       const newMedia = new Media();
 
-      if (!metadata.Id) {
+      if (!metadata?.Id) {
         logger.debug('No Id metadata for this title. Skipping', {
           label: 'Plex Sync',
           ratingKey: jellyfinitem.Id,
@@ -83,13 +84,17 @@ class JellyfinScanner {
       }
 
       const has4k = metadata.MediaSources?.some((MediaSource) => {
-        return MediaSource.MediaStreams.some((MediaStream) => {
+        return MediaSource.MediaStreams.filter(
+          (MediaStream) => MediaStream.Type === 'Video'
+        ).some((MediaStream) => {
           return (MediaStream.Width ?? 0) > 2000;
         });
       });
 
       const hasOtherResolution = metadata.MediaSources?.some((MediaSource) => {
-        return MediaSource.MediaStreams.some((MediaStream) => {
+        return MediaSource.MediaStreams.filter(
+          (MediaStream) => MediaStream.Type === 'Video'
+        ).some((MediaStream) => {
           return (MediaStream.Width ?? 0) <= 2000;
         });
       });
@@ -168,9 +173,9 @@ class JellyfinScanner {
           newMedia.jellyfinMediaId =
             hasOtherResolution || (!this.enable4kMovie && has4k)
               ? metadata.Id
-              : undefined;
+              : null;
           newMedia.jellyfinMediaId4k =
-            has4k && this.enable4kMovie ? metadata.Id : undefined;
+            has4k && this.enable4kMovie ? metadata.Id : null;
           await mediaRepository.save(newMedia);
           this.log(`Saved ${metadata.Name}`);
         }
@@ -197,14 +202,35 @@ class JellyfinScanner {
         jellyfinitem.SeriesId ?? jellyfinitem.SeasonId ?? jellyfinitem.Id;
       const metadata = await this.jfClient.getItemData(Id);
 
-      if (metadata.ProviderIds.Tvdb) {
-        tvShow = await this.tmdb.getShowByTvdbId({
-          tvdbId: Number(metadata.ProviderIds.Tvdb),
+      if (!metadata?.Id) {
+        logger.debug('No Id metadata for this title. Skipping', {
+          label: 'Plex Sync',
+          ratingKey: jellyfinitem.Id,
         });
-      } else if (metadata.ProviderIds.Tmdb) {
-        tvShow = await this.tmdb.getTvShow({
-          tvId: Number(metadata.ProviderIds.Tmdb),
-        });
+        return;
+      }
+
+      if (metadata.ProviderIds.Tmdb) {
+        try {
+          tvShow = await this.tmdb.getTvShow({
+            tvId: Number(metadata.ProviderIds.Tmdb),
+          });
+        } catch {
+          this.log('Unable to find TMDb ID for this title.', 'debug', {
+            jellyfinitem,
+          });
+        }
+      }
+      if (!tvShow && metadata.ProviderIds.Tvdb) {
+        try {
+          tvShow = await this.tmdb.getShowByTvdbId({
+            tvdbId: Number(metadata.ProviderIds.Tvdb),
+          });
+        } catch {
+          this.log('Unable to find TVDb ID for this title.', 'debug', {
+            jellyfinitem,
+          });
+        }
       }
 
       if (tvShow) {
@@ -275,7 +301,7 @@ class JellyfinScanner {
                     episode.Id
                   );
 
-                  ExtendedEpisodeData.MediaSources?.some((MediaSource) => {
+                  ExtendedEpisodeData?.MediaSources?.some((MediaSource) => {
                     return MediaSource.MediaStreams.some((MediaStream) => {
                       if (MediaStream.Type === 'Video') {
                         if ((MediaStream.Width ?? 0) >= 2000) {
@@ -453,8 +479,9 @@ class JellyfinScanner {
               tmdbId: tvShow.id,
               tvdbId: tvShow.external_ids.tvdb_id,
               mediaAddedAt: new Date(metadata.DateCreated ?? ''),
-              jellyfinMediaId: Id,
-              jellyfinMediaId4k: Id,
+              jellyfinMediaId: isAllStandardSeasons ? Id : null,
+              jellyfinMediaId4k:
+                isAll4kSeasons && this.enable4kShow ? Id : null,
               status: isAllStandardSeasons
                 ? MediaStatus.AVAILABLE
                 : newSeasons.some(
@@ -477,7 +504,13 @@ class JellyfinScanner {
           }
         });
       } else {
-        this.log(`failed show: ${metadata.Name}`);
+        this.log(
+          `No information found for the show: ${metadata.Name}`,
+          'debug',
+          {
+            jellyfinitem,
+          }
+        );
       }
     } catch (e) {
       this.log(
@@ -553,7 +586,10 @@ class JellyfinScanner {
   public async run(): Promise<void> {
     const settings = getSettings();
 
-    if (settings.main.mediaServerType != MediaServerType.JELLYFIN) {
+    if (
+      settings.main.mediaServerType != MediaServerType.JELLYFIN &&
+      settings.main.mediaServerType != MediaServerType.EMBY
+    ) {
       return;
     }
 
@@ -568,12 +604,7 @@ class JellyfinScanner {
       const userRepository = getRepository(User);
       const admin = await userRepository.findOne({
         where: { id: 1 },
-        select: [
-          'id',
-          'jellyfinAuthToken',
-          'jellyfinUserId',
-          'jellyfinDeviceId',
-        ],
+        select: ['id', 'jellyfinUserId', 'jellyfinDeviceId'],
         order: { id: 'ASC' },
       });
 
@@ -582,8 +613,8 @@ class JellyfinScanner {
       }
 
       this.jfClient = new JellyfinAPI(
-        settings.jellyfin.hostname ?? '',
-        admin.jellyfinAuthToken,
+        getHostname(),
+        settings.jellyfin.apiKey,
         admin.jellyfinDeviceId
       );
 

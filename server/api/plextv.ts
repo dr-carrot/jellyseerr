@@ -1,9 +1,10 @@
+import ExternalAPI from '@server/api/externalapi';
 import type { PlexDevice } from '@server/interfaces/api/plexInterfaces';
 import cacheManager from '@server/lib/cache';
 import { getSettings } from '@server/lib/settings';
 import logger from '@server/logger';
+import { randomUUID } from 'node:crypto';
 import xml2js from 'xml2js';
-import ExternalAPI from './externalapi';
 
 interface PlexAccountResponse {
   user: PlexUser;
@@ -127,6 +128,11 @@ export interface PlexWatchlistItem {
   title: string;
 }
 
+export interface PlexWatchlistCache {
+  etag: string;
+  response: WatchlistResponse;
+}
+
 class PlexTvAPI extends ExternalAPI {
   private authToken: string;
 
@@ -137,8 +143,6 @@ class PlexTvAPI extends ExternalAPI {
       {
         headers: {
           'X-Plex-Token': authToken,
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
         },
         nodeCache: cacheManager.getCache('plextv').data,
       }
@@ -149,15 +153,11 @@ class PlexTvAPI extends ExternalAPI {
 
   public async getDevices(): Promise<PlexDevice[]> {
     try {
-      const devicesResp = await this.axios.get(
-        '/api/resources?includeHttps=1',
-        {
-          transformResponse: [],
-          responseType: 'text',
-        }
-      );
+      const devicesResp = await this.get('/api/resources', {
+        includeHttps: '1',
+      });
       const parsedXml = await xml2js.parseStringPromise(
-        devicesResp.data as DeviceResponse
+        devicesResp as DeviceResponse
       );
       return parsedXml?.MediaContainer?.Device?.map((pxml: DeviceResponse) => ({
         name: pxml.$.name,
@@ -205,11 +205,11 @@ class PlexTvAPI extends ExternalAPI {
 
   public async getUser(): Promise<PlexUser> {
     try {
-      const account = await this.axios.get<PlexAccountResponse>(
+      const account = await this.get<PlexAccountResponse>(
         '/users/account.json'
       );
 
-      return account.data.user;
+      return account.user;
     } catch (e) {
       logger.error(
         `Something went wrong while getting the account from plex.tv: ${e.message}`,
@@ -249,13 +249,10 @@ class PlexTvAPI extends ExternalAPI {
   }
 
   public async getUsers(): Promise<UsersResponse> {
-    const response = await this.axios.get('/api/users', {
-      transformResponse: [],
-      responseType: 'text',
-    });
+    const data = await this.get('/api/users');
 
     const parsedXml = (await xml2js.parseStringPromise(
-      response.data
+      data as string
     )) as UsersResponse;
     return parsedXml;
   }
@@ -270,25 +267,50 @@ class PlexTvAPI extends ExternalAPI {
     items: PlexWatchlistItem[];
   }> {
     try {
-      const response = await this.axios.get<WatchlistResponse>(
-        '/library/sections/watchlist/all',
-        {
-          params: {
-            'X-Plex-Container-Start': offset,
-            'X-Plex-Container-Size': size,
-          },
-          baseURL: 'https://metadata.provider.plex.tv',
-        }
+      const watchlistCache = cacheManager.getCache('plexwatchlist');
+      let cachedWatchlist = watchlistCache.data.get<PlexWatchlistCache>(
+        this.authToken
       );
 
+      const params = new URLSearchParams({
+        'X-Plex-Container-Start': offset.toString(),
+        'X-Plex-Container-Size': size.toString(),
+      });
+      const response = await this.fetch(
+        `https://metadata.provider.plex.tv/library/sections/watchlist/all?${params.toString()}`,
+        {
+          headers: {
+            ...this.defaultHeaders,
+            ...(cachedWatchlist?.etag
+              ? { 'If-None-Match': cachedWatchlist.etag }
+              : {}),
+          },
+        }
+      );
+      const data = (await response.json()) as WatchlistResponse;
+
+      // If we don't recieve HTTP 304, the watchlist has been updated and we need to update the cache.
+      if (response.status >= 200 && response.status <= 299) {
+        cachedWatchlist = {
+          etag: response.headers.get('etag') ?? '',
+          response: data,
+        };
+
+        watchlistCache.data.set<PlexWatchlistCache>(
+          this.authToken,
+          cachedWatchlist
+        );
+      }
+
       const watchlistDetails = await Promise.all(
-        (response.data.MediaContainer.Metadata ?? []).map(
+        (cachedWatchlist?.response.MediaContainer.Metadata ?? []).map(
           async (watchlistItem) => {
             const detailedResponse = await this.getRolling<MetadataResponse>(
               `/library/metadata/${watchlistItem.ratingKey}`,
-              {
-                baseURL: 'https://metadata.provider.plex.tv',
-              }
+              {},
+              undefined,
+              {},
+              'https://metadata.provider.plex.tv'
             );
 
             const metadata = detailedResponse.MediaContainer.Metadata[0];
@@ -320,7 +342,7 @@ class PlexTvAPI extends ExternalAPI {
       return {
         offset,
         size,
-        totalSize: response.data.MediaContainer.totalSize,
+        totalSize: cachedWatchlist?.response.MediaContainer.totalSize ?? 0,
         items: filteredList,
       };
     } catch (e) {
@@ -334,6 +356,29 @@ class PlexTvAPI extends ExternalAPI {
         totalSize: 0,
         items: [],
       };
+    }
+  }
+
+  public async pingToken() {
+    try {
+      const data: { pong: unknown } = await this.get(
+        '/api/v2/ping',
+        {},
+        undefined,
+        {
+          headers: {
+            'X-Plex-Client-Identifier': randomUUID(),
+          },
+        }
+      );
+      if (!data?.pong) {
+        throw new Error('No pong response');
+      }
+    } catch (e) {
+      logger.error('Failed to ping token', {
+        label: 'Plex Refresh Token',
+        errorMessage: e.message,
+      });
     }
   }
 }

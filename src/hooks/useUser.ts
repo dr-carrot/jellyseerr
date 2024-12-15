@@ -12,6 +12,7 @@ export interface User {
   id: number;
   warnings: string[];
   plexUsername?: string;
+  jellyfinUsername?: string;
   username?: string;
   displayName: string;
   email: string;
@@ -28,7 +29,8 @@ type NotificationAgentTypes = Record<NotificationAgentKey, number>;
 
 export interface UserSettings {
   discordId?: string;
-  region?: string;
+  discoverRegion?: string;
+  streamingRegion?: string;
   originalLanguage?: string;
   locale?: string;
   notificationTypes: Partial<NotificationAgentTypes>;

@@ -1,6 +1,7 @@
 import JellyfinAPI from '@server/api/jellyfin';
 import PlexTvAPI from '@server/api/plextv';
-import { MediaServerType } from '@server/constants/server';
+import { ApiErrorCode } from '@server/constants/error';
+import { MediaServerType, ServerType } from '@server/constants/server';
 import { UserType } from '@server/constants/user';
 import { getRepository } from '@server/datasource';
 import { User } from '@server/entity/User';
@@ -9,8 +10,11 @@ import { Permission } from '@server/lib/permissions';
 import { getSettings } from '@server/lib/settings';
 import logger from '@server/logger';
 import { isAuthenticated } from '@server/middleware/auth';
+import { ApiError } from '@server/types/error';
+import { getHostname } from '@server/utils/getHostname';
 import * as EmailValidator from 'email-validator';
 import { Router } from 'express';
+import net from 'net';
 
 const authRoutes = Router();
 
@@ -83,7 +87,7 @@ authRoutes.post('/plex', async (req, res, next) => {
       });
 
       settings.main.mediaServerType = MediaServerType.PLEX;
-      settings.save();
+      await settings.save();
       startJobs();
 
       await userRepository.save(user);
@@ -218,31 +222,43 @@ authRoutes.post('/jellyfin', async (req, res, next) => {
     username?: string;
     password?: string;
     hostname?: string;
+    port?: number;
+    urlBase?: string;
+    useSsl?: boolean;
     email?: string;
+    serverType?: number;
   };
 
-  //Make sure jellyfin login is enabled, but only if jellyfin is not already configured
+  //Make sure jellyfin login is enabled, but only if jellyfin && Emby is not already configured
   if (
     settings.main.mediaServerType !== MediaServerType.JELLYFIN &&
-    settings.jellyfin.hostname !== ''
+    settings.main.mediaServerType !== MediaServerType.EMBY &&
+    settings.main.mediaServerType != MediaServerType.NOT_CONFIGURED &&
+    settings.jellyfin.ip !== ''
   ) {
     return res.status(500).json({ error: 'Jellyfin login is disabled' });
-  } else if (!body.username) {
+  }
+
+  if (!body.username) {
     return res.status(500).json({ error: 'You must provide an username' });
-  } else if (settings.jellyfin.hostname !== '' && body.hostname) {
+  } else if (settings.jellyfin.ip !== '' && body.hostname) {
     return res
       .status(500)
       .json({ error: 'Jellyfin hostname already configured' });
-  } else if (settings.jellyfin.hostname === '' && !body.hostname) {
+  } else if (settings.jellyfin.ip === '' && !body.hostname) {
     return res.status(500).json({ error: 'No hostname provided.' });
   }
 
   try {
     const hostname =
-      settings.jellyfin.hostname !== ''
-        ? settings.jellyfin.hostname
-        : body.hostname ?? '';
-    const { externalHostname } = getSettings().jellyfin;
+      settings.jellyfin.ip !== ''
+        ? getHostname()
+        : getHostname({
+            useSsl: body.useSsl,
+            ip: body.hostname,
+            port: body.port,
+            urlBase: body.urlBase,
+          });
 
     // Try to find deviceId that corresponds to jellyfin user, else generate a new one
     let user = await userRepository.findOne({
@@ -257,41 +273,157 @@ authRoutes.post('/jellyfin', async (req, res, next) => {
         'base64'
       );
     }
+
     // First we need to attempt to log the user in to jellyfin
     const jellyfinserver = new JellyfinAPI(hostname ?? '', undefined, deviceId);
-    let jellyfinHost =
-      externalHostname && externalHostname.length > 0
-        ? externalHostname
-        : hostname;
 
-    jellyfinHost = jellyfinHost.endsWith('/')
-      ? jellyfinHost.slice(0, -1)
-      : jellyfinHost;
+    const ip = req.ip;
+    let clientIp;
 
-    const account = await jellyfinserver.login(body.username, body.password);
+    if (ip) {
+      if (net.isIPv4(ip)) {
+        clientIp = ip;
+      } else if (net.isIPv6(ip)) {
+        clientIp = ip.startsWith('::ffff:') ? ip.substring(7) : ip;
+      }
+    }
+
+    const account = await jellyfinserver.login(
+      body.username,
+      body.password,
+      clientIp
+    );
+
     // Next let's see if the user already exists
     user = await userRepository.findOne({
       where: { jellyfinUserId: account.User.Id },
     });
 
-    if (user) {
-      // Let's check if their authtoken is up to date
-      if (user.jellyfinAuthToken !== account.AccessToken) {
-        user.jellyfinAuthToken = account.AccessToken;
+    const missingAdminUser = !user && !(await userRepository.count());
+    if (
+      missingAdminUser ||
+      settings.main.mediaServerType === MediaServerType.NOT_CONFIGURED
+    ) {
+      // Check if user is admin on jellyfin
+      if (account.User.Policy.IsAdministrator === false) {
+        throw new ApiError(403, ApiErrorCode.NotAdmin);
       }
 
-      // Update the users avatar with their jellyfin profile pic (incase it changed)
-      if (account.User.PrimaryImageTag) {
-        user.avatar = `${jellyfinHost}/Users/${account.User.Id}/Images/Primary/?tag=${account.User.PrimaryImageTag}&quality=90`;
+      if (
+        body.serverType !== MediaServerType.JELLYFIN &&
+        body.serverType !== MediaServerType.EMBY
+      ) {
+        throw new Error('select_server_type');
+      }
+      settings.main.mediaServerType = body.serverType;
+
+      if (missingAdminUser) {
+        logger.info(
+          'Sign-in attempt from Jellyfin user with access to the media server; creating initial admin user for Jellyseerr',
+          {
+            label: 'API',
+            ip: req.ip,
+            jellyfinUsername: account.User.Name,
+          }
+        );
+
+        // User doesn't exist, and there are no users in the database, we'll create the user
+        // with admin permissions
+
+        user = new User({
+          id: 1,
+          email: body.email || account.User.Name,
+          jellyfinUsername: account.User.Name,
+          jellyfinUserId: account.User.Id,
+          jellyfinDeviceId: deviceId,
+          jellyfinAuthToken: account.AccessToken,
+          permissions: Permission.ADMIN,
+          avatar: `/avatarproxy/${account.User.Id}`,
+          userType:
+            body.serverType === MediaServerType.JELLYFIN
+              ? UserType.JELLYFIN
+              : UserType.EMBY,
+        });
+
+        await userRepository.save(user);
       } else {
-        user.avatar = '/os_logo_square.png';
+        logger.info(
+          'Sign-in attempt from Jellyfin user with access to the media server; editing admin user for Jellyseerr',
+          {
+            label: 'API',
+            ip: req.ip,
+            jellyfinUsername: account.User.Name,
+          }
+        );
+
+        // User alread exist but settings.json is not configured, we'll edit the admin user
+
+        user = await userRepository.findOne({
+          where: { id: 1 },
+        });
+        if (!user) {
+          throw new Error('Unable to find admin user to edit');
+        }
+        user.email = body.email || account.User.Name;
+        user.jellyfinUsername = account.User.Name;
+        user.jellyfinUserId = account.User.Id;
+        user.jellyfinDeviceId = deviceId;
+        user.jellyfinAuthToken = account.AccessToken;
+        user.permissions = Permission.ADMIN;
+        user.avatar = `/avatarproxy/${account.User.Id}`;
+        user.userType =
+          body.serverType === MediaServerType.JELLYFIN
+            ? UserType.JELLYFIN
+            : UserType.EMBY;
+
+        await userRepository.save(user);
       }
 
+      // Create an API key on Jellyfin from this admin user
+      const jellyfinClient = new JellyfinAPI(
+        hostname,
+        account.AccessToken,
+        deviceId
+      );
+      const apiKey = await jellyfinClient.createApiToken('Jellyseerr');
+
+      const serverName = await jellyfinserver.getServerName();
+
+      settings.jellyfin.name = serverName;
+      settings.jellyfin.serverId = account.User.ServerId;
+      settings.jellyfin.ip = body.hostname ?? '';
+      settings.jellyfin.port = body.port ?? 8096;
+      settings.jellyfin.urlBase = body.urlBase ?? '';
+      settings.jellyfin.useSsl = body.useSsl ?? false;
+      settings.jellyfin.apiKey = apiKey;
+      await settings.save();
+      startJobs();
+    }
+    // User already exists, let's update their information
+    else if (account.User.Id === user?.jellyfinUserId) {
+      logger.info(
+        `Found matching ${
+          settings.main.mediaServerType === MediaServerType.JELLYFIN
+            ? ServerType.JELLYFIN
+            : ServerType.EMBY
+        } user; updating user with ${
+          settings.main.mediaServerType === MediaServerType.JELLYFIN
+            ? ServerType.JELLYFIN
+            : ServerType.EMBY
+        }`,
+        {
+          label: 'API',
+          ip: req.ip,
+          jellyfinUsername: account.User.Name,
+        }
+      );
+      user.avatar = `/avatarproxy/${account.User.Id}`;
       user.jellyfinUsername = account.User.Name;
 
       if (user.username === account.User.Name) {
         user.username = '';
       }
+
       await userRepository.save(user);
     } else if (!settings.main.newPlexLogin) {
       logger.warn(
@@ -307,69 +439,35 @@ authRoutes.post('/jellyfin', async (req, res, next) => {
         status: 403,
         message: 'Access denied.',
       });
-    } else {
-      // Here we check if it's the first user. If it is, we create the user with no check
-      // and give them admin permissions
-      const totalUsers = await userRepository.count();
-      if (totalUsers === 0) {
-        logger.info(
-          'Sign-in attempt from Jellyfin user with access to the media server; creating initial admin user for Overseerr',
-          {
-            label: 'API',
-            ip: req.ip,
-            jellyfinUsername: account.User.Name,
-          }
-        );
-        user = new User({
-          email: body.email,
+    } else if (!user) {
+      logger.info(
+        'Sign-in attempt from Jellyfin user with access to the media server; creating new Overseerr user',
+        {
+          label: 'API',
+          ip: req.ip,
           jellyfinUsername: account.User.Name,
-          jellyfinUserId: account.User.Id,
-          jellyfinDeviceId: deviceId,
-          jellyfinAuthToken: account.AccessToken,
-          permissions: Permission.ADMIN,
-          avatar: account.User.PrimaryImageTag
-            ? `${jellyfinHost}/Users/${account.User.Id}/Images/Primary/?tag=${account.User.PrimaryImageTag}&quality=90`
-            : '/os_logo_square.png',
-          userType: UserType.JELLYFIN,
-        });
-        await userRepository.save(user);
-
-        //Update hostname in settings if it doesn't exist (initial configuration)
-        //Also set mediaservertype to JELLYFIN
-        if (settings.jellyfin.hostname === '') {
-          settings.main.mediaServerType = MediaServerType.JELLYFIN;
-          settings.jellyfin.hostname = body.hostname ?? '';
-          settings.jellyfin.serverId = account.User.ServerId;
-          settings.save();
-          startJobs();
         }
+      );
+
+      user = new User({
+        email: body.email,
+        jellyfinUsername: account.User.Name,
+        jellyfinUserId: account.User.Id,
+        jellyfinDeviceId: deviceId,
+        permissions: settings.main.defaultPermissions,
+        avatar: `/avatarproxy/${account.User.Id}`,
+        userType:
+          settings.main.mediaServerType === MediaServerType.JELLYFIN
+            ? UserType.JELLYFIN
+            : UserType.EMBY,
+      });
+
+      //initialize Jellyfin/Emby users with local login
+      const passedExplicitPassword = body.password && body.password.length > 0;
+      if (passedExplicitPassword) {
+        await user.setPassword(body.password ?? '');
       }
-
-      if (!user) {
-        if (!body.email) {
-          throw new Error('add_email');
-        }
-
-        user = new User({
-          email: body.email,
-          jellyfinUsername: account.User.Name,
-          jellyfinUserId: account.User.Id,
-          jellyfinDeviceId: deviceId,
-          jellyfinAuthToken: account.AccessToken,
-          permissions: settings.main.defaultPermissions,
-          avatar: account.User.PrimaryImageTag
-            ? `${jellyfinHost}/Users/${account.User.Id}/Images/Primary/?tag=${account.User.PrimaryImageTag}&quality=90`
-            : '/os_logo_square.png',
-          userType: UserType.JELLYFIN,
-        });
-        //initialize Jellyfin/Emby users with local login
-        const passedExplicitPassword =
-          body.password && body.password.length > 0;
-        if (passedExplicitPassword) {
-          await user.setPassword(body.password ?? '');
-        }
-        await userRepository.save(user);
-      }
+      await userRepository.save(user);
     }
 
     // Set logged in session
@@ -379,33 +477,68 @@ authRoutes.post('/jellyfin', async (req, res, next) => {
 
     return res.status(200).json(user?.filter() ?? {});
   } catch (e) {
-    if (e.message === 'Unauthorized') {
-      logger.warn(
-        'Failed login attempt from user with incorrect Jellyfin credentials',
-        {
-          label: 'Auth',
-          account: {
-            ip: req.ip,
-            email: body.username,
-            password: '__REDACTED__',
-          },
-        }
-      );
-      return next({
-        status: 401,
-        message: 'Unauthorized',
-      });
-    } else if (e.message === 'add_email') {
-      return next({
-        status: 406,
-        message: 'CREDENTIAL_ERROR_ADD_EMAIL',
-      });
-    } else {
-      logger.error(e.message, { label: 'Auth' });
-      return next({
-        status: 500,
-        message: 'Something went wrong.',
-      });
+    switch (e.errorCode) {
+      case ApiErrorCode.InvalidUrl:
+        logger.error(
+          `The provided ${
+            process.env.JELLYFIN_TYPE == 'emby' ? 'Emby' : 'Jellyfin'
+          } is invalid or the server is not reachable.`,
+          {
+            label: 'Auth',
+            error: e.errorCode,
+            status: e.statusCode,
+            hostname: getHostname({
+              useSsl: body.useSsl,
+              ip: body.hostname,
+              port: body.port,
+              urlBase: body.urlBase,
+            }),
+          }
+        );
+        return next({
+          status: e.statusCode,
+          message: e.errorCode,
+        });
+
+      case ApiErrorCode.InvalidCredentials:
+        logger.warn(
+          'Failed login attempt from user with incorrect Jellyfin credentials',
+          {
+            label: 'Auth',
+            account: {
+              ip: req.ip,
+              email: body.username,
+              password: '__REDACTED__',
+            },
+          }
+        );
+        return next({
+          status: e.statusCode,
+          message: e.errorCode,
+        });
+
+      case ApiErrorCode.NotAdmin:
+        logger.warn(
+          'Failed login attempt from user without admin permissions',
+          {
+            label: 'Auth',
+            account: {
+              ip: req.ip,
+              email: body.username,
+            },
+          }
+        );
+        return next({
+          status: e.statusCode,
+          message: e.errorCode,
+        });
+
+      default:
+        logger.error(e.message, { label: 'Auth' });
+        return next({
+          status: 500,
+          message: 'Something went wrong.',
+        });
     }
   }
 });
@@ -630,6 +763,7 @@ authRoutes.post('/reset-password/:guid', async (req, res, next) => {
     });
   }
   user.recoveryLinkExpirationDate = null;
+  await user.setPassword(req.body.password);
   userRepository.save(user);
   logger.info('Successfully reset password', {
     label: 'API',

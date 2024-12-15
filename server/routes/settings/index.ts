@@ -2,6 +2,7 @@ import JellyfinAPI from '@server/api/jellyfin';
 import PlexAPI from '@server/api/plexapi';
 import PlexTvAPI from '@server/api/plextv';
 import TautulliAPI from '@server/api/tautulli';
+import { ApiErrorCode } from '@server/constants/error';
 import { getRepository } from '@server/datasource';
 import Media from '@server/entity/Media';
 import { MediaRequest } from '@server/entity/MediaRequest';
@@ -24,8 +25,10 @@ import { getSettings } from '@server/lib/settings';
 import logger from '@server/logger';
 import { isAuthenticated } from '@server/middleware/auth';
 import discoverSettingRoutes from '@server/routes/settings/discover';
+import { ApiError } from '@server/types/error';
 import { appDataPath } from '@server/utils/appDataVolume';
 import { getAppVersion } from '@server/utils/appVersion';
+import { getHostname } from '@server/utils/getHostname';
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import fs from 'fs';
@@ -66,19 +69,19 @@ settingsRoutes.get('/main', (req, res, next) => {
   res.status(200).json(filteredMainSettings(req.user, settings.main));
 });
 
-settingsRoutes.post('/main', (req, res) => {
+settingsRoutes.post('/main', async (req, res) => {
   const settings = getSettings();
 
   settings.main = merge(settings.main, req.body);
-  settings.save();
+  await settings.save();
 
   return res.status(200).json(settings.main);
 });
 
-settingsRoutes.post('/main/regenerate', (req, res, next) => {
+settingsRoutes.post('/main/regenerate', async (req, res, next) => {
   const settings = getSettings();
 
-  const main = settings.regenerateApiKey();
+  const main = await settings.regenerateApiKey();
 
   if (!req.user) {
     return next({ status: 500, message: 'User missing from request.' });
@@ -115,7 +118,7 @@ settingsRoutes.post('/plex', async (req, res, next) => {
     settings.plex.machineId = result.MediaContainer.machineIdentifier;
     settings.plex.name = result.MediaContainer.friendlyName;
 
-    settings.save();
+    await settings.save();
   } catch (e) {
     logger.error('Something went wrong testing Plex connection', {
       label: 'API',
@@ -228,7 +231,7 @@ settingsRoutes.get('/plex/library', async (req, res) => {
     ...library,
     enabled: enabledLibraries.includes(library.id),
   }));
-  settings.save();
+  await settings.save();
   return res.status(200).json(settings.plex.libraries);
 });
 
@@ -251,34 +254,98 @@ settingsRoutes.get('/jellyfin', (_req, res) => {
   res.status(200).json(settings.jellyfin);
 });
 
-settingsRoutes.post('/jellyfin', (req, res) => {
+settingsRoutes.post('/jellyfin', async (req, res, next) => {
+  const userRepository = getRepository(User);
   const settings = getSettings();
 
-  settings.jellyfin = merge(settings.jellyfin, req.body);
-  settings.save();
+  try {
+    const admin = await userRepository.findOneOrFail({
+      where: { id: 1 },
+      select: ['id', 'jellyfinUserId', 'jellyfinDeviceId'],
+      order: { id: 'ASC' },
+    });
+
+    const tempJellyfinSettings = { ...settings.jellyfin, ...req.body };
+
+    const jellyfinClient = new JellyfinAPI(
+      getHostname(tempJellyfinSettings),
+      tempJellyfinSettings.apiKey,
+      admin.jellyfinDeviceId ?? ''
+    );
+
+    const result = await jellyfinClient.getSystemInfo();
+
+    if (!result?.Id) {
+      throw new ApiError(result?.status, ApiErrorCode.InvalidUrl);
+    }
+
+    Object.assign(settings.jellyfin, req.body);
+    settings.jellyfin.serverId = result.Id;
+    settings.jellyfin.name = result.ServerName;
+    await settings.save();
+  } catch (e) {
+    if (e instanceof ApiError) {
+      logger.error('Something went wrong testing Jellyfin connection', {
+        label: 'API',
+        status: e.statusCode,
+        errorMessage: ApiErrorCode.InvalidUrl,
+      });
+
+      return next({
+        status: e.statusCode,
+        message: ApiErrorCode.InvalidUrl,
+      });
+    } else {
+      logger.error('Something went wrong', {
+        label: 'API',
+        errorMessage: e.message,
+      });
+
+      return next({
+        status: e.statusCode ?? 500,
+        message: ApiErrorCode.Unknown,
+      });
+    }
+  }
 
   return res.status(200).json(settings.jellyfin);
 });
 
-settingsRoutes.get('/jellyfin/library', async (req, res) => {
+settingsRoutes.get('/jellyfin/library', async (req, res, next) => {
   const settings = getSettings();
 
   if (req.query.sync) {
     const userRepository = getRepository(User);
     const admin = await userRepository.findOneOrFail({
-      select: ['id', 'jellyfinAuthToken', 'jellyfinDeviceId', 'jellyfinUserId'],
+      select: ['id', 'jellyfinDeviceId', 'jellyfinUserId'],
       where: { id: 1 },
       order: { id: 'ASC' },
     });
     const jellyfinClient = new JellyfinAPI(
-      settings.jellyfin.hostname ?? '',
-      admin.jellyfinAuthToken ?? '',
+      getHostname(),
+      settings.jellyfin.apiKey,
       admin.jellyfinDeviceId ?? ''
     );
 
     jellyfinClient.setUserId(admin.jellyfinUserId ?? '');
 
     const libraries = await jellyfinClient.getLibraries();
+
+    if (libraries.length === 0) {
+      // Check if no libraries are found due to the fallback to user views
+      // This only affects LDAP users
+      const account = await jellyfinClient.getUser();
+
+      // Automatic Library grouping is not supported when user views are used to get library
+      if (account.Configuration.GroupedFolders.length > 0) {
+        return next({
+          status: 501,
+          message: ApiErrorCode.SyncErrorGroupedFolders,
+        });
+      }
+
+      return next({ status: 404, message: ApiErrorCode.SyncErrorNoLibraries });
+    }
 
     const newLibraries: Library[] = libraries.map((library) => {
       const existing = settings.jellyfin.libraries.find(
@@ -303,30 +370,22 @@ settingsRoutes.get('/jellyfin/library', async (req, res) => {
     ...library,
     enabled: enabledLibraries.includes(library.id),
   }));
-  settings.save();
+  await settings.save();
   return res.status(200).json(settings.jellyfin.libraries);
 });
 
 settingsRoutes.get('/jellyfin/users', async (req, res) => {
   const settings = getSettings();
-  const { hostname, externalHostname } = getSettings().jellyfin;
-  let jellyfinHost =
-    externalHostname && externalHostname.length > 0
-      ? externalHostname
-      : hostname;
 
-  jellyfinHost = jellyfinHost.endsWith('/')
-    ? jellyfinHost.slice(0, -1)
-    : jellyfinHost;
   const userRepository = getRepository(User);
   const admin = await userRepository.findOneOrFail({
-    select: ['id', 'jellyfinAuthToken', 'jellyfinDeviceId', 'jellyfinUserId'],
+    select: ['id', 'jellyfinDeviceId', 'jellyfinUserId'],
     where: { id: 1 },
     order: { id: 'ASC' },
   });
   const jellyfinClient = new JellyfinAPI(
-    settings.jellyfin.hostname ?? '',
-    admin.jellyfinAuthToken ?? '',
+    getHostname(),
+    settings.jellyfin.apiKey,
     admin.jellyfinDeviceId ?? ''
   );
 
@@ -335,9 +394,7 @@ settingsRoutes.get('/jellyfin/users', async (req, res) => {
   const users = resp.users.map((user) => ({
     username: user.Name,
     id: user.Id,
-    thumb: user.PrimaryImageTag
-      ? `${jellyfinHost}/Users/${user.Id}/Images/Primary/?tag=${user.PrimaryImageTag}&quality=90`
-      : '/os_logo_square.png',
+    thumb: `/avatarproxy/${user.Id}`,
     email: user.Name,
   }));
 
@@ -377,7 +434,7 @@ settingsRoutes.post('/tautulli', async (req, res, next) => {
         throw new Error('Tautulli version not supported');
       }
 
-      settings.save();
+      await settings.save();
     } catch (e) {
       logger.error('Something went wrong testing Tautulli connection', {
         label: 'API',
@@ -638,7 +695,7 @@ settingsRoutes.post<{ jobId: JobId }>(
 
 settingsRoutes.post<{ jobId: JobId }>(
   '/jobs/:jobId/schedule',
-  (req, res, next) => {
+  async (req, res, next) => {
     const scheduledJob = scheduledJobs.find(
       (job) => job.id === req.params.jobId
     );
@@ -652,7 +709,7 @@ settingsRoutes.post<{ jobId: JobId }>(
 
     if (result) {
       settings.jobs[scheduledJob.id].schedule = req.body.schedule;
-      settings.save();
+      await settings.save();
 
       scheduledJob.cronSchedule = req.body.schedule;
 
@@ -681,11 +738,13 @@ settingsRoutes.get('/cache', async (_req, res) => {
   }));
 
   const tmdbImageCache = await ImageProxy.getImageStats('tmdb');
+  const avatarImageCache = await ImageProxy.getImageStats('avatar');
 
   return res.status(200).json({
     apiCaches,
     imageCache: {
       tmdb: tmdbImageCache,
+      avatar: avatarImageCache,
     },
   });
 });
@@ -707,11 +766,11 @@ settingsRoutes.post<{ cacheId: AvailableCacheIds }>(
 settingsRoutes.post(
   '/initialize',
   isAuthenticated(Permission.ADMIN),
-  (_req, res) => {
+  async (_req, res) => {
     const settings = getSettings();
 
     settings.public.initialized = true;
-    settings.save();
+    await settings.save();
 
     return res.status(200).json(settings.public);
   }

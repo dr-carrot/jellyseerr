@@ -1,15 +1,16 @@
 import useSettings from '@app/hooks/useSettings';
+import defineMessages from '@app/utils/defineMessages';
 import { Listbox, Transition } from '@headlessui/react';
 import { CheckIcon, ChevronDownIcon } from '@heroicons/react/24/solid';
 import type { Region } from '@server/lib/settings';
-import { hasFlag } from 'country-flag-icons';
+import { countries } from 'country-flag-icons';
 import 'country-flag-icons/3x2/flags.css';
 import { sortBy } from 'lodash';
 import { useEffect, useMemo, useState } from 'react';
-import { defineMessages, useIntl } from 'react-intl';
+import { useIntl } from 'react-intl';
 import useSWR from 'swr';
 
-const messages = defineMessages({
+const messages = defineMessages('components.RegionSelector', {
   regionDefault: 'All Regions',
   regionServerDefault: 'Default ({region})',
 });
@@ -20,6 +21,7 @@ interface RegionSelectorProps {
   isUserSetting?: boolean;
   disableAll?: boolean;
   watchProviders?: boolean;
+  regionType?: 'discover' | 'streaming';
   onChange?: (fieldName: string, region: string) => void;
 }
 
@@ -29,6 +31,7 @@ const RegionSelector = ({
   isUserSetting = false,
   disableAll = false,
   watchProviders = false,
+  regionType = 'discover',
   onChange,
 }: RegionSelectorProps) => {
   const { currentSettings } = useSettings();
@@ -62,6 +65,11 @@ const RegionSelector = ({
     sortedRegions?.find((region) => region.iso_3166_1 === regionCode)?.name ??
     regionCode;
 
+  const regionValue =
+    regionType === 'discover'
+      ? currentSettings.discoverRegion
+      : currentSettings.streamingRegion;
+
   useEffect(() => {
     if (regions && value) {
       if (value === 'all') {
@@ -92,17 +100,16 @@ const RegionSelector = ({
           <div className="relative">
             <span className="inline-block w-full rounded-md shadow-sm">
               <Listbox.Button className="focus:shadow-outline-blue relative flex w-full cursor-default items-center rounded-md border border-gray-500 bg-gray-700 py-2 pl-3 pr-10 text-left text-white transition duration-150 ease-in-out focus:border-blue-300 focus:outline-none sm:text-sm sm:leading-5">
-                {((selectedRegion && hasFlag(selectedRegion?.iso_3166_1)) ||
+                {((selectedRegion &&
+                  countries.includes(selectedRegion?.iso_3166_1)) ||
                   (isUserSetting &&
                     !selectedRegion &&
-                    currentSettings.region &&
-                    hasFlag(currentSettings.region))) && (
+                    regionValue &&
+                    countries.includes(regionValue))) && (
                   <span className="mr-2 h-4 overflow-hidden text-base leading-4">
                     <span
                       className={`flag:${
-                        selectedRegion
-                          ? selectedRegion.iso_3166_1
-                          : currentSettings.region
+                        selectedRegion ? selectedRegion.iso_3166_1 : regionValue
                       }`}
                     />
                   </span>
@@ -112,8 +119,8 @@ const RegionSelector = ({
                     ? regionName(selectedRegion.iso_3166_1)
                     : isUserSetting && selectedRegion?.iso_3166_1 !== 'all'
                     ? intl.formatMessage(messages.regionServerDefault, {
-                        region: currentSettings.region
-                          ? regionName(currentSettings.region)
+                        region: regionValue
+                          ? regionName(regionValue)
                           : intl.formatMessage(messages.regionDefault),
                       })
                     : intl.formatMessage(messages.regionDefault)}
@@ -146,8 +153,8 @@ const RegionSelector = ({
                         <span className="mr-2 text-base">
                           <span
                             className={
-                              hasFlag(currentSettings.region)
-                                ? `flag:${currentSettings.region}`
+                              countries.includes(regionValue)
+                                ? `flag:${regionValue}`
                                 : 'pr-6'
                             }
                           />
@@ -158,8 +165,8 @@ const RegionSelector = ({
                           } block truncate`}
                         >
                           {intl.formatMessage(messages.regionServerDefault, {
-                            region: currentSettings.region
-                              ? regionName(currentSettings.region)
+                            region: regionValue
+                              ? regionName(regionValue)
                               : intl.formatMessage(messages.regionDefault),
                           })}
                         </span>
@@ -215,7 +222,7 @@ const RegionSelector = ({
                         <span className="mr-2 text-base">
                           <span
                             className={
-                              hasFlag(region.iso_3166_1)
+                              countries.includes(region.iso_3166_1)
                                 ? `flag:${region.iso_3166_1}`
                                 : 'pr-6'
                             }

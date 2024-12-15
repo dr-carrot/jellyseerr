@@ -16,9 +16,11 @@
     "hideAvailable": false,
     "localLogin": true,
     "newPlexLogin": true,
-    "region": "",
+    "discoverRegion": "",
+    "streamingRegion": "",
     "originalLanguage": "",
     "trustProxy": false,
+    "mediaServerType": 1,
     "partialRequestsEnabled": true,
     "locale": "en"
   },
@@ -36,6 +38,17 @@
       }
     ],
     "machineId": "test"
+  },
+  "jellyfin": {
+    "name": "",
+    "ip": "",
+    "port": 8096,
+    "useSsl": false,
+    "urlBase": "",
+    "externalHostname": "",
+    "jellyfinForgotPasswordUrl": "",
+    "libraries": [],
+    "serverId": ""
   },
   "tautulli": {},
   "radarr": [],
@@ -63,6 +76,7 @@
         "types": 0,
         "options": {
           "webhookUrl": "",
+          "webhookRoleId": "",
           "enableMentions": true
         }
       },
@@ -139,11 +153,26 @@
     "sonarr-scan": {
       "schedule": "0 30 4 * * *"
     },
+    "plex-watchlist-sync": {
+      "schedule": "0 */10 * * * *"
+    },
+    "availability-sync": {
+      "schedule": "0 0 5 * * *"
+    },
     "download-sync": {
       "schedule": "0 * * * * *"
     },
     "download-sync-reset": {
       "schedule": "0 0 1 * * *"
+    },
+    "jellyfin-recently-added-scan": {
+      "schedule": "0 */5 * * * *"
+    },
+    "jellyfin-full-scan": {
+      "schedule": "0 0 3 * * *"
+    },
+    "image-cache-cleanup": {
+      "schedule": "0 0 5 * * *"
     }
   }
 }
